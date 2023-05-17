@@ -1,0 +1,619 @@
+---
+title: "killing assay analysis"
+author: ""
+date: "`r format(Sys.Date(), '%d %b %Y')`"
+output:
+  html_document:
+    toc: TRUE 
+    toc_float:
+      collapsed: FALSE
+      smooth_scroll: FALSE  
+    toc_depth: 3
+#instead of changing every filter and header in the document according to selections and filters, replace the terms with params$Experiment_ID or `r params$Experiment_ID` and only change the params value in the YAML header here:    
+params:
+  Experiment_ID: xxx # options are : 
+  Evalkilling: TRUE # change to FALSE to exclude all code chunks related to killing graphs
+---
+
+```{r setup, include=FALSE}
+
+# This template was generated to streamline the analysis of various Incucyte readouts (NLR count, cytotox green, confluence or similar).
+# It finds its use case in all experiments where different cell lines are requiring comparisons (i.e. KO cell lines). 
+# In those cases control cells (for KO cells those control cells would be Scr-gRNA treated controls) are used to make sure the samples have 
+# controls which are seeded at the same density and similar growth. Therefor multiple cell numbers are seeded around the range of the sample seeding.
+# 
+# This analysis protocol then compares all samples to their corresponding growth control automatically by calculating the Area under the curve (AUC) 
+# for each cell line and condition and plotting the samples with their controls according to the smalles AUC delta.
+
+# Various variables can be tweaked and multiple conditions can be tested while having the code automatically respond to the data available.
+
+# This template requires the R analysis.xlsx file for input of the data and correct formating of the graphs.
+
+##
+##
+##
+
+## load packages
+library(languageserver)
+library(tidyverse)
+library(data.table)
+library(readxl)
+library(knitr)
+
+## select global settings for code chunks
+knitr::opts_chunk$set(fig.align = 'center', echo = FALSE)
+
+## loading of file
+
+import <- read_excel("R analysis_AUC.xlsx", sheet = 4 , col_names=TRUE)
+
+## loading of Introduction and user values
+data_info <- read_excel("R analysis_AUC.xlsx", sheet = 2, col_names = FALSE)
+Introduction <- as.character(data_info[28, 15])
+
+## assign variable for y axis and controls
+y_value <- as.character(data_info[28, 15])
+y_column_value <- "cytotox"
+x_value <- as.character(data_info[28, 15])
+x_column_value <- "time_h"
+
+## styling
+
+# Sample_colors <-c("Scr_low" = grey(0.6),
+#                "Scr_mid" = grey(0.3),
+#                "Scr_high" = grey(0),
+#                "FZD7-gd6" = "red")
+
+# sample_colors = vector
+
+Sample_colors <-c("Scr_low" = grey(0.75),
+               "Scr_mid" = grey(0.5),
+               "Scr_high" = grey(0.25),
+               "Scr_higher" = grey(0),
+               "Pos. ctrl" = "red",
+               "Blue" = "blue",
+               "Yellow" = "yellow",
+               "Purple" = "purple",
+               "Green" = "green",
+               "Orange" = "orange"
+               )
+
+
+## Unpivot the data table to transform the matrix of time points into a column of time points for each sample
+## Generates the columns for x and y to plot which in the Excel are part of a matrix. 
+
+import_unpiv <- gather(import, x_column_value, y_column_value, -(Experiment_ID:Filter_ID)) %>%
+  mutate(x_column_value = as.double(x_column_value)) %>%
+  mutate(TCB_pM = as.numeric(TCB_pM))
+
+## ASdd Mean and SD of NLR count to imported and transformed table
+
+import_final <- import_unpiv %>%
+  group_by(Curve_ID, Data_type, x_column_value) %>%
+  mutate(mean_y_value = mean(y_column_value),
+         sd_y_value = sd(y_column_value)) %>%
+  ungroup()
+
+## reduce code and add theme layers used in every graph using a variable
+
+plot_elements <-  list(geom_errorbar(aes(ymin = mean_y_value + sd_y_value, 
+                    ymax = mean_y_value + sd_y_value)), 
+                    geom_linerange(aes(ymin= mean_y_value, ymax = mean_y_value + sd_y_value)),
+                    scale_color_manual(values = Sample_colors),
+                    scale_fill_manual(values = Sample_colors))
+
+```
+
+
+```{r Introduction, results="asis", messages = FALSE, echo=FALSE, warning = FALSE, collapse = TRUE, include=TRUE}
+
+## create a header for the introduction 
+cat( "# ", "Introduction", "\n")
+
+## input the introduction/experiment description of the user.
+## The variable Introduction was extracted in the setup code chunk
+cat("\n\n")
+cat(Introduction, "\n")
+cat("\n\n")
+
+
+```
+
+# Growth {.tabset -}
+
+## Growth curve
+
+```{r Growth, fig.dim =c(8,8), echo=FALSE, eval=TRUE, include=TRUE}
+
+## plot Growth for each sample in each condition
+
+Growth <- import_final %>%
+  filter(Data_type == "Growth")
+
+Growth_curve <- ggplot(Growth, aes(x_column_value, mean_y_value, color = KO))+
+  geom_point() +
+  geom_line() +
+  facet_wrap(vars(get(names(Growth)[6]), get(names(Growth)[7]), get(names(Growth)[8])), ncol = 2)+
+  labs(title = "Growth curve", x = "time (h)", y = y_value)+
+  plot_elements 
+
+plot(Growth_curve)
+
+```
+
+## Area under the curve
+
+```{r AUC, include=TRUE, messages = FALSE, echo=FALSE, warning = FALSE}
+## writing the function for the Area under the curve (AUC) to finally compare the values of each sample to the value of the controls using the AUC. The control sample with the AUC value closest to the AUC value of the sample, is the correct growth control.
+
+## The function is calculating the sum of trapezoids between adjacent raw data points.
+
+area_func <- function(x,y){
+  AUC <- 0
+  if (length(x) <2) {
+    return (NA)
+  }
+  for(i in 1:(length(x)-1)){
+    increment = ((x[i+1]-x[i])*(0.5*(y[i]+y[i+1])))
+    if(! ( is.na(increment) | is.infinite(increment) ) ) {
+      AUC <- AUC + increment
+    }
+  }
+  return(AUC)
+}
+
+## add AUC values to Growth table
+
+Growth <- Growth %>%
+  group_by(KO, Curve_ID) %>% 
+  mutate(AUC = area_func(x= x_column_value, y = mean_y_value)) %>%
+  ungroup()
+  
+## plot the table  of AUC values and extract the Scr values
+
+Growth_samples_table <- Growth %>%
+  group_by(KO, Filter_ID) %>%
+  summarise(AUC = area_func(x= x_column_value, y = mean_y_value)) %>%
+  ungroup()
+
+kable(Growth_samples_table)
+```
+
+
+```{r AUC_delta, include=TRUE, messages = FALSE, echo=FALSE, warning = FALSE}
+
+## calculate the delta of AUC which will be used for the Growth comparison between Scr Growth controls and the samples
+
+# extract the Growth values for the samples only
+Growth_samples_only <- Growth_samples_table %>% filter(KO != "Scr_low", KO != "Scr_mid", KO != "Scr_high", KO != "Scr_higher" )
+
+# calculate the absolute AUC delta between the AUC of the sample and AUC of the Scr growth controls stored in Growth_samples_table.
+# The specific AUC value is determined by subsetting "Growth_samples_table" with conditions in square brackets.
+# the correct growth control is chosen by filtering for the correct Scr ctrl and the Filter_ID withing those brackets
+#     Growth_samples_table$Filter_ID == Filter_ID",selects rows where the value in the "Filter_ID" column is equal to the "Filter_ID" variable 
+#     in the current row of "Growth_samples_only".
+
+# Save the deltas in new columns by mutating the columns to a DF saved under the variable AUC_delta
+AUC_delta <- Growth_samples_only %>% 
+  mutate(Scr_low_delta = abs(AUC - Growth_samples_table$AUC[Growth_samples_table$KO == "Scr_low" 
+                                                        & Growth_samples_table$Filter_ID == Filter_ID])) %>% 
+  mutate(Scr_mid_delta =  abs(AUC - Growth_samples_table$AUC[Growth_samples_table$KO == "Scr_mid" 
+                                                        & Growth_samples_table$Filter_ID == Filter_ID])) %>%
+  mutate(Scr_high_delta =  abs(AUC - Growth_samples_table$AUC[Growth_samples_table$KO == "Scr_high" 
+                                                          & Growth_samples_table$Filter_ID == Filter_ID])) 
+
+  # since not every data set has a Scr_higher control we need the code to be optional and situational
+  Scr_higher_available <- any(unique(Growth_samples_table$KO) == "Scr_higher")
+
+  if(Scr_higher_available == TRUE) {
+  AUC_delta <- AUC_delta %>%   
+   mutate(Scr_higher_delta = abs(AUC - Growth_samples_table$AUC[Growth_samples_table$KO == "Scr_higher" 
+                                                           & Growth_samples_table$Filter_ID == Filter_ID]))
+  }
+  
+Growth <- Growth %>% 
+  left_join(AUC_delta, by = c("KO", "Filter_ID", "AUC"))
+
+## create seperate data tables containing the Scr ctrl and the samples with the lowest Growth delta to each control.
+## first we filter for the relevant killing data and then add the the AUC delta values that where calculated above using a left_join.. 
+
+killing_AUC <- import_final %>%
+  filter(Data_type == "killing curve", TCB != "DP47-TCB", TCB_pM != "0") %>%
+  left_join(AUC_delta, by = c("Filter_ID", "KO"))
+
+## create tables that only contain each Scr seeding control
+killing_Scr_low_only <- killing_AUC %>%
+  filter(Data_type == "killing curve", KO == "Scr_low") 
+killing_Scr_mid_only <- killing_AUC %>%
+  filter(Data_type == "killing curve", KO == "Scr_mid") 
+killing_Scr_high_only <- killing_AUC %>%
+  filter(Data_type == "killing curve", KO == "Scr_high")
+killing_Scr_higher_only <- killing_AUC %>%
+  filter(Data_type == "killing curve", KO == "Scr_higher")
+
+# create the following if Sc_higher_delta exists, else create the same DFs without Scr_higher.
+
+if(Scr_higher_available == TRUE) {
+
+## filter for all samples where AUC_delta is the lowest in between sample and Scr_low and save it in a seperate data table
+killing_Scr_low <- killing_AUC %>%
+  filter(Scr_low_delta < Scr_high_delta, Scr_low_delta < Scr_mid_delta, Scr_low_delta < Scr_higher_delta)
+## add the Scr_low_only data table generated above 
+  if (nrow(killing_Scr_low) > 1) {
+   killing_Scr_low <- rbind(killing_Scr_low, killing_Scr_low_only)
+  }
+
+## repeat the same for the other Scr controls
+killing_Scr_mid <- killing_AUC %>%
+  filter(Scr_mid_delta < Scr_high_delta, Scr_mid_delta < Scr_low_delta, Scr_mid_delta < Scr_higher_delta)
+
+     if (nrow(killing_Scr_mid) > 1) {
+     killing_Scr_mid <- rbind(killing_Scr_mid, killing_Scr_mid_only)
+  }
+
+killing_Scr_high <- killing_AUC %>%
+  filter(Scr_high_delta < Scr_low_delta, Scr_high_delta < Scr_mid_delta, Scr_high_delta < Scr_higher_delta)
+
+     if (nrow(killing_Scr_high) > 1) {
+     killing_Scr_high <- rbind(killing_Scr_high, killing_Scr_high_only)
+  }
+
+killing_Scr_higher <- killing_AUC %>%
+  filter(Scr_higher_delta < Scr_low_delta, Scr_higher_delta < Scr_mid_delta, Scr_higher_delta < Scr_high_delta)
+
+     if (nrow(killing_Scr_higher) > 1) {
+     killing_Scr_higher <- rbind(killing_Scr_higher, killing_Scr_higher_only)
+  }
+}else{ 
+  
+  killing_Scr_low <- killing_AUC %>%
+  filter(Scr_low_delta < Scr_high_delta, Scr_low_delta < Scr_mid_delta)
+
+     if (nrow(killing_Scr_low) > 1) {
+     killing_Scr_low <- rbind(killing_Scr_low, killing_Scr_low_only)
+  }
+
+killing_Scr_mid <- killing_AUC %>%
+  filter(Scr_mid_delta < Scr_high_delta, Scr_mid_delta < Scr_low_delta)
+
+    if (nrow(killing_Scr_mid) > 1) {
+     killing_Scr_mid <- rbind(killing_Scr_mid, killing_Scr_mid_only)
+  }
+
+killing_Scr_high <- killing_AUC %>%
+  filter(Scr_high_delta < Scr_low_delta, Scr_high_delta < Scr_mid_delta)
+
+    if (nrow(killing_Scr_high) > 1) {
+    killing_Scr_high <- rbind(killing_Scr_high, killing_Scr_high_only)
+  }
+
+}
+
+## populate a list of all killing tables to use further down.
+if(Scr_higher_available == TRUE) {
+list_of_killings <- list(killing_Scr_low, killing_Scr_mid, killing_Scr_high, killing_Scr_higher)
+} else {
+ list_of_killings <- list(killing_Scr_low, killing_Scr_mid, killing_Scr_high) 
+
+}
+```
+
+
+```{r killing_plots_function, results="asis", echo=FALSE, eval=TRUE, collapse=TRUE, message = TRUE, include = TRUE, keep_md = TRUE}
+## write a function to plot each of the data frames separately
+## the function takes each iteration in column 6, 7 and 9 (usually Donor, TCB or normalization method) 
+## of the imported data and generates separate plots for each of them while respecting a tabset hierarchy.
+## The facet wrap is done via column 8 (usually the TCB or compound conc.) and for each sample cell line seperately.
+
+
+
+graphs_func <- function (x) {
+
+## for each sample / cell line we want to tabset and generate individual plots while not considering the controls as samples.  
+
+for (h in setdiff(unique(x[[5]]), c("Scr_low", "Scr_mid", "Scr_high", "Scr_higher"))) {
+  
+  cat("## ", h, "{.tabset .tabset-fade .tabset-pills}", "\n")  
+  
+  xh <- filter(x, (x[[5]] == h) | x[[5]] == "Scr_low" | x[[5]] == "Scr_mid" | x[[5]] == "Scr_high" | x[[5]] == "Scr_higher")
+
+## if we have multiple iterations in column 6 of the data set we filter and tabset for them. If it is only 1 iteration we ignore it.
+  
+if (length(unique(xh[[6]])) > 1) {
+
+    ## for each iteration (i) in column 6 (can be anything like analysis method, experimenter, normalization method) 
+    ## we generate a seperate df and print the i as a tabset header.
+  
+    for(i in unique(x[[6]])) {
+  
+    filtered_df_i <- filter(xh, (xh[[6]] == i))
+        
+    cat("### ", i, "{.tabset}", "\n")  
+  
+      # for each iteration (j) in column 7 (usually the donor column) we generate a separate df and print the i as a tabset header.
+      for (j in unique(x[[7]])){
+  
+      filtered_df_i_j <- filter(filtered_df_i, (filtered_df_i[[7]] == j))
+          
+      cat("#### ", j, "{.tabset}", "\n")
+  
+        ## the filtered df is feed into the next for-loop to generate further filtered dfs based on iterations (k) in column 8 (usually the TCB or compound column).
+        ## we again generate a seperate df.
+        for (k in unique(filtered_df_i_j[[8]])){
+    
+        filtered_df_i_j_k <- filter(filtered_df_i_j, (filtered_df_i_j[[8]] == k))
+    
+  
+          ## Next we need to check if data frame has at least one row.Some filtered combinations of i and j might not exist giving us a empty df.
+          ## Is this the case, we skip it for the ggplot function.
+          ## Empty dfs would cause an error in the code when trying to plot the killing_facet.
+                if (nrow(filtered_df_i_j_k) > 0) {
+                  
+          #generate the facet_wrap using the filtered data set.    
+                  killing_facet <- ggplot(filtered_df_i_j_k, aes(x_column_value, mean_y_value, color = KO)) +
+                    geom_point() +
+                    geom_line() +
+                    facet_wrap(vars(get(names(filtered_df_i_j_k)[9])), ncol = 2) +
+                    labs(title = "killing curve", x = "time (h)", y = paste("normalized", y_value, sep = " ")) +
+                    plot_elements +
+                    ggtitle(paste(j, i, sep = " ; "))
+                }
+      
+      ## Now we plot the graph after adding the tabset header for iteration k.
+      cat("###### ", k, "\n")
+      print(killing_facet) 
+      cat('\n\n')
+      
+    }  
+    }
+    }
+    } else {  
+  
+
+# for each iteration (j) in column 7 (usually the donor column) we generate a seperate df and print j as a tabset header.
+for (j in unique(xh[[7]])){
+
+filtered_df_j <- filter(xh, (xh[[7]] == j))
+        
+cat("### ", j, "{.tabset}", "\n")
+
+    ## the filtered df is feed into the next for-loop to generate further filtered dfs based on iterations (k) in column 8 (usually the TCB or compound column).
+    ## we again generate a seperate df.
+    for (k in unique(filtered_df_j[[8]])){
+    
+    filtered_df_j_k <- filter(filtered_df_j, (filtered_df_j[[8]] == k))
+
+
+        ## Next we need to check if the dataframe has at least one row. Some filtered combinations of j and k might not exist giving us an empty df.
+        ## Is this the case, we skip it for the ggplot function.
+        ## Empty dfs would cause an error in the code when trying to plot the killing_facet.
+              if (nrow(filtered_df_j_k) > 0) {
+        
+            #generate the facet_wrap using the filtered data set.    
+                    killing_facet <- ggplot(filtered_df_j_k, aes(x_column_value, mean_y_value, color = KO)) +
+                      geom_point() +
+                      geom_line() +
+                      facet_wrap(vars(get(names(filtered_df_j_k)[9])), ncol = 2) +
+                      labs(title = "killing curve", x = "time (h)", y = paste("normalized", y_value, sep = " ")) +
+                      plot_elements +
+                      ggtitle(paste(j, k, sep = " ; "))
+                  }
+
+    ## Now we plot the graph while after adding the tabset header for iteration j.
+    cat("#### ", k, "\n")
+    print(killing_facet) 
+    cat('\n\n')
+      
+}
+}
+}
+}
+}
+
+ 
+```
+
+# {-}
+
+# killing plots
+
+The following analysis is plotting each sample with its corresponding control based on similar growth and seeding.
+The area under the curve (AUC) was calculated for each cell line and each seeding control.
+The difference in AUC (AUC delta) between sample and each seeding control was then calculated. 
+The smallest AUC delta corresponds to the most similar growth and seeding.
+Therefore the samples where assigned to the controls based on their smallest AUC delta and graphs were plotted accordingly. 
+
+
+
+```{r killing_plots_Scr_low, results="asis", fig.dim =c(8,8), echo=FALSE, eval=params$Evalkilling, collapse=TRUE, message = FALSE, include = TRUE}
+
+## Apply the graphs_func created above, to plot all the curves with a similar seeding than Scr_low.
+## only plot the header and graphs if there are samples growing similar to Scr_low
+
+if(nrow(killing_Scr_low) >1) {
+cat( "# ", "Samples only with Scr low {.tabset .tabset-fade .tabset-pills}", "\n")  
+graphs_func(killing_Scr_low)
+}
+
+```
+
+
+```{r killing_plots_Scr_mid, results="asis", fig.dim =c(8,8), echo=FALSE, eval=params$Evalkilling, collapse=TRUE, message = FALSE, include = TRUE}
+
+## Apply the graphs_func created above, to plot all the curves with a similar seeding than Scr_mid
+## only plot the header and graphs if there are samples growing similar to Scr_mid
+
+if(nrow(killing_Scr_mid) > 1) {
+cat( "# ", "Samples only with Scr mid {.tabset .tabset-fade .tabset-pills}", "\n")  
+graphs_func(killing_Scr_mid)
+}
+
+```
+
+
+```{r killing_plots_Scr_high, results="asis", fig.dim =c(8,8), echo=FALSE, eval=params$Evalkilling, collapse=TRUE, message = FALSE, include = TRUE}
+
+## Apply the graphs_func created above, to plot all the curves with a similar seeding than Scr_high
+## only plot the header and graphs if there are samples growing similar to Scr_high
+if(nrow(killing_Scr_high) > 1) {
+cat( "# ", "Samples only with Scr high {.tabset .tabset-fade .tabset-pills}", "\n")  
+graphs_func(killing_Scr_high)
+}
+
+```
+
+
+```{r killing_plots_Scr_higher, results="asis", fig.dim =c(8,8), echo=FALSE, eval=params$Evalkilling, collapse=TRUE, message = FALSE, include = TRUE}
+
+## Apply the graphs_func created above, to plot all the curves with a similar seeding than Scr_higher
+## only plot the header and graphs if there are samples growing similar to Scr_higher
+
+if(Scr_higher_available == TRUE) {
+cat( "# ", "Samples only with Scr higher {.tabset .tabset-fade .tabset-pills}", "\n")  
+graphs_func(killing_Scr_higher)
+}
+
+```
+
+# Killing plots including all Growth controls {.tabset .tabset-fade .tabset-pills}
+
+```{r killing_plots_AUC, results="asis", fig.dim =c(8,8), echo=FALSE, eval=params$Evalkilling, collapse=TRUE, message = FALSE, include = TRUE}
+
+## Apply the graphs_func created above, to plot all the curves with all Seeding controls.
+
+graphs_func(killing_AUC)
+
+```
+
+# {-}
+
+
+```{r killing_plots_by Gene_func, results="asis", echo=FALSE, eval=params$Evalkilling, collapse=TRUE, message = FALSE, include = TRUE}
+
+## This code chunk will plot each gene separately only with its corresponding Scr growth controls while comparing iterations in column 7 (Donors)
+## If multiple iterations in column 6 or 8 are present this code does not work and will therefore not be executed. Further modifications would be needed. 
+
+## lists are needed in the code to plot the graphs and label them for the output as a tab.
+## initilize list to populate them later on  
+KO_graph_list <- list()
+KO_graph_names <- list()
+
+# write the function used to create the plots
+grid_graph_func <- function(x) {
+
+## Here we determine that the code should only be executed if multiple iterations in column 6 or 8 are not present.
+   if(length(unique(x[[6]])) <= 1 & length(unique(x[[7]])) > 1 & length(unique(x[[8]])) <= 1){
+  
+## loop for each gene in the dataset (i in column 5) separately while excluding the controls as iterations to plot for.  
+  
+for (i in setdiff(unique(x[[5]]), c("Scr_low", "Scr_mid", "Scr_high", "Scr_higher"))) {
+  
+## Filter for each KO iteration seperately while keeping the available controls present in the data set.
+xi <- filter(x, KO == i | KO == "Scr_low" | KO == "Scr_mid" | KO == "Scr_high" | KO == "Scr_higher")
+
+## save the names of the genes (i) in the list for names 
+KO_graph_names[[i]] <- i
+
+#loop over iterations in other columns (TCB, normalization methods)
+for (j in unique(x[[8]])) { 
+for (h in unique(x[[6]])) {  
+   
+## for each element in column 6 and 8 of the data set create separate plots, facet grid by column 9 and 7 (PBMC donor and compound conc.)     
+killing_grid_KO <- ggplot(subset(xi, xi[[8]] == j & xi[[6]] == h), aes(x_column_value, mean_y_value, color = KO)) +
+  geom_point() +
+  geom_line() +
+  facet_grid(rows= vars(get(names(xi)[9])), cols = vars(get(names(xi)[7]))) +
+  labs(title = "killing curve", x = "time (h)", y = paste("normalized", y_value, sep = " ")) +
+  plot_elements + 
+  ggtitle(paste(i, j, h, sep = " ; "))
+
+## populate the list of graphs by adding each new plot (killing_grid_KO) to the list
+KO_graph_list <- c(KO_graph_list, list(killing_grid_KO))  
+
+}
+}  
+}
+## name the graphs by using the list of names
+names(KO_graph_list) <- KO_graph_names
+
+## for each i in the list of graphs a header is printed using cat(). This allows to print each graph using its name in the header after printing "### " which helps rmarkdown recognize it as a tab. "\n" are required for properly creating the tabs and elements. 
+  for (i in seq_along(KO_graph_list)){
+    cat("## ", names(KO_graph_list)[[i]], "\n")
+    print(KO_graph_list[[i]])
+    cat('\n\n')
+
+  }
+}
+}
+
+```
+
+
+```{r killing_plots_by Gene_all_conc, results="asis", fig.height=10, fig.width= 10, echo=FALSE, eval=params$Evalkilling, collapse=TRUE, message = FALSE, include = TRUE}
+
+## Only load the facet_grid function and headline if the conditions are met. 
+if(length(unique(killing_AUC[[6]])) <= 1 & length(unique(killing_AUC[[7]])) > 1 & length(unique(killing_AUC[[8]])) <= 1){
+  cat("# ", "Facet Grid per Gene by Donor {.tabset}", "\n")
+    lapply(list_of_killings, grid_graph_func)
+    }
+
+```
+
+
+
+
+
+
+
+
+
+```{r killing_plots_function_old, results="asis", echo=FALSE, eval=FALSE, collapse=TRUE, message = TRUE, include = FALSE, keep_md = TRUE}
+
+##
+## This code chunk and function is old and not used anymore
+##
+
+# initialize empty lists
+graph_list <- list()
+donor_names <- list()
+TCB_names <- list()
+normalization_names <- list()
+
+graphs_func <- function(x){
+    
+for (i in unique(x[[7]])){
+## populate donor names list with iterations of i.  
+donor_names[[i]] <- i
+## plot killing faceted by columns 6, 7 and 9.
+for (j in unique(x[[8]])){
+## populate TCB names list with iterations of j.
+TCB_names[[j]] <- j  
+## populate normalization names list with iterations of h. 
+for (h in unique(x[[6]])){ 
+norm_names[[h]] <- h   
+   
+  killing_facet <- ggplot(subset(x, x[[7]] == i & x[[8]] == j & x[[6]] == h), aes(x_column_value, mean_y_value, color = KO)) +
+  geom_point() +
+  geom_line() +
+  facet_wrap(vars(get(names(x)[9])), ncol = 2) +
+  labs(title = "killing curve", x = "time (h)", y = paste("normalized", y_value, sep = " ")) +
+  plot_elements +
+  ggtitle(paste(j, i, h, sep = " ; "))  
+  
+#populate graph list with all the graphs
+graph_list <- c(graph_list, list(killing_facet))  
+
+}
+}
+}
+#name the graph list
+names(graph_list) <- donor_names
+# plot the graphs while extracting the name of the graph from the list and printing it as header.
+for (i in seq_along(graph_list)) {
+    cat("### ", names(graph_list)[i], "\n")
+  print(graph_list[[i]])
+  cat('\n\n')
+}
+}
+ 
+```
