@@ -1,3 +1,5 @@
+# Incucyte killing assay analysis template for R
+
 This template was generated to streamline the analysis of various Incucyte readouts (NLR count, cytotox green, confluence or similar).
 It finds its use case in all experiments where different cell lines are requiring comparisons (i.e. KO cell lines).
 In those cases control cells are used to make sure the samples have controls which are seeded at the same density and similar growth.
